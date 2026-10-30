@@ -16,7 +16,12 @@ def load_and_clean()-> pd.DataFrame:
 
     # Load all sheets as DataFrames
 
-    file_path = r"C:\Users\jemur\Dropbox\UNSW_26\unsw_app\VIC_Uni_Enrols_2019-2021_Exercise 1.xlsx"
+    # file_path = r"C:\Users\jemur\Dropbox\UNSW_26\unsw_app\VIC_Uni_Enrols_2019-2021_Exercise 1.xlsx"
+    
+    file_path = (
+        Path(__file__).resolve().parent
+        / "VIC_Uni_Enrols_2019-2021_Exercise 1.xlsx"
+    )
 
     dfs = pd.read_excel(file_path, sheet_name=None)
     field, vic_df, course, competitors = dfs.values()
