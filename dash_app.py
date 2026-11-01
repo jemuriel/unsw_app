@@ -1,8 +1,10 @@
 
+from io import StringIO
+from pathlib import Path
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
-from pathlib import Path
 
 st.set_page_config(
     page_title="University Enrolment Intelligence",
@@ -13,21 +15,19 @@ st.set_page_config(
 # -----------------------------
 # DATA
 # -----------------------------
-def load_and_clean()-> pd.DataFrame:
+@st.cache_data(max_entries=2, show_spinner="Loading and validating enrolment data…")
+def load_and_clean(file_path, source_version) -> tuple[pd.DataFrame, str]:
+    """Cache cleaned data and its validation report for each workbook version."""
+    validation_output = StringIO()
 
-    # Load all sheets as DataFrames
+    def log(*args, **kwargs):
+        print(*args, file=validation_output, **kwargs)
 
-    # file_path = r"C:\Users\jemur\Dropbox\UNSW_26\unsw_app\VIC_Uni_Enrols_2019-2021_Exercise 1.xlsx"
-    
-    file_path = (
-        Path(__file__).resolve().parent
-        / "VIC_Uni_Enrols_2019-2021_Exercise 1.xlsx"
-    )
-
-    dfs = pd.read_excel(file_path, sheet_name=None)
-    field, vic_df, course, competitors = dfs.values()
-
-    # vic_df = vic_df.head(10000)
+    # The first sheet is an unused field lookup; parse only the three inputs.
+    with pd.ExcelFile(file_path) as workbook:
+        vic_df, course, competitors = [
+            workbook.parse(sheet) for sheet in workbook.sheet_names[1:4]
+        ]
 
     # Change domestic indicatro if 'not provided'
     vic_df.loc[
@@ -35,8 +35,6 @@ def load_and_clean()-> pd.DataFrame:
         (vic_df['perm_home_res'] != 'Australia'),
         'overseas_domestic_indicator'
     ] = 'Overseas Students'
-
-    # TODO Change SES_2016_SA1 status if 'Unknown'
 
     # Left join
 
@@ -64,12 +62,12 @@ def load_and_clean()-> pd.DataFrame:
     )
 
     # Checs unmatched records ----------------------------
-    print("Course joins:")
-    print(df_joined["course_match"].value_counts())
+    log("Course joins:")
+    log(df_joined["course_match"].value_counts())
 
-    print('-'*50)
-    print("\nCompetitor joins:")
-    print(df_joined["competitor_match"].value_counts())
+    log('-'*50)
+    log("\nCompetitor joins:")
+    log(df_joined["competitor_match"].value_counts())
 
     # Reconciliation
     assert len(df_joined) == len(vic_df)
@@ -80,21 +78,21 @@ def load_and_clean()-> pd.DataFrame:
         df_joined["Key UNSW Competitor"].eq("Y")
     )
 
-    print("\nmll join reconciliation checks passed.")
+    log("\nAll join reconciliation checks passed.")
 
     # Check missing values per colunm
     missing = df_joined.isna().sum()
 
-    print(missing[missing > 0])
+    log(missing[missing > 0])
 
     # Check row count and enrolment reconciliation
-    print('-'*50)
-    print("\nOriginal rows:", len(vic_df))
-    print("Joined rows:", len(df_joined))
+    log('-'*50)
+    log("\nOriginal rows:", len(vic_df))
+    log("Joined rows:", len(df_joined))
 
-    print('-'*50)
-    print("\nOriginal enrolments:", vic_df["enrolments"].sum())
-    print("Joined enrolments:", df_joined["enrolments"].sum())
+    log('-'*50)
+    log("\nOriginal enrolments:", vic_df["enrolments"].sum())
+    log("Joined enrolments:", df_joined["enrolments"].sum())
 
     # Missing values --------------------------------------
     # Check empty strings and whitespace
@@ -102,19 +100,19 @@ def load_and_clean()-> pd.DataFrame:
         lambda col: col.astype("string").str.strip().eq("").sum()
     )
 
-    print('-'*50)
-    print("\nEmpty strings:")
-    print(empty_strings[empty_strings > 0])
+    log('-'*50)
+    log("\nEmpty strings:")
+    log(empty_strings[empty_strings > 0])
 
     # Duplicated records -----------------------------------
     # Exact duplicates across all columns
     duplicates = df_joined.duplicated().sum()
 
-    print("Exact duplicate rows:", duplicates)
+    log("Exact duplicate rows:", duplicates)
 
     # Display if any
     if duplicates > 0:
-        display(df_joined[df.duplicated(keep=False)].head(10))
+        log(df_joined[df_joined.duplicated(keep=False)].head(10).to_string(index=False))
 
     # invalid enrollments -----------------------------------
 
@@ -124,19 +122,19 @@ def load_and_clean()-> pd.DataFrame:
         errors="coerce"
     )
 
-    print("Missing/non-numeric:", enrolments.isna().sum())
-    print("Negative values:", (enrolments < 0).sum())
-    print("Zero values:", (enrolments == 0).sum())
-    print("Non-integer values:",
+    log("Missing/non-numeric:", enrolments.isna().sum())
+    log("Negative values:", (enrolments < 0).sum())
+    log("Zero values:", (enrolments == 0).sum())
+    log("Non-integer values:",
         (enrolments.dropna() % 1 != 0).sum())
 
-    print("\nEnrolment summary:")
-    print(enrolments.describe())
+    log("\nEnrolment summary:")
+    log(enrolments.describe())
 
     # Coverage across years ----------------------------
     # Inspect actual column names
-    print('-'*50)
-    print(df_joined.columns.tolist())
+    log('-'*50)
+    log(df_joined.columns.tolist())
 
     # Check institution-year coverage
     coverage = pd.crosstab(
@@ -144,15 +142,114 @@ def load_and_clean()-> pd.DataFrame:
         df_joined["ref_year"]
     )
 
-    print(coverage.to_string())
+    log(coverage.to_string())
 
-    print('-'*50)
-    print("\nYears available:")
-    print(sorted(df_joined["ref_year"].dropna().unique()))
+    log('-'*50)
+    log("\nYears available:")
+    log(sorted(df_joined["ref_year"].dropna().unique()))
 
-    return df_joined
+    return df_joined, validation_output.getvalue()
 
-df = load_and_clean()
+def participation_matrix(data, row, column, column_order=None, row_order=None):
+    """Return enrolment counts and percentages within each row; no denominator is N/A."""
+    counts = data.groupby([row, column], observed=True)["enrolments"].sum().unstack(fill_value=0)
+    if column_order is not None:
+        counts = counts.reindex(columns=column_order, fill_value=0)
+    if row_order is not None:
+        counts = counts.reindex(index=row_order, fill_value=0)
+    shares = counts.div(counts.sum(axis=1).replace(0, float("nan")), axis=0).mul(100)
+    return counts, shares
+
+def participation_heatmap(data, row, column, row_label, column_label,
+                          column_order=None, row_order=None, height=450):
+    counts, shares = participation_matrix(data, row, column, column_order, row_order)
+    if counts.empty:
+        st.info("No enrolments match the selected filters.")
+        return
+    fig = px.imshow(
+        shares, aspect="auto", text_auto=".1f", zmin=0, zmax=100,
+        color_continuous_scale="Blues",
+        labels={"x": column_label, "y": row_label, "color": "Share (%)"}
+    )
+    fig.update_traces(
+        customdata=counts.to_numpy(), hoverongaps=False,
+        texttemplate="%{z:.1f}%",
+        hovertemplate=("%{y}<br>%{x}<br>Share within row: %{z:.1f}%"
+                       "<br>Enrolments: %{customdata:,.0f}<extra></extra>")
+    )
+    fig.update_layout(height=height, margin=dict(l=15, r=15, t=35, b=80),
+                      font=dict(size=11), coloraxis_colorbar=dict(title="Share (%)"))
+    fig.update_xaxes(side="bottom", tickangle=-25)
+    st.plotly_chart(fig, width="stretch")
+
+def render_equity(filtered, latest_year):
+    required = {"gender", "SES_2016_SA1", "broad_foe", "ref_year", "enrolments"}
+    missing = required.difference(filtered.columns)
+    if missing:
+        st.warning("Equity analysis requires: " + ", ".join(sorted(missing)))
+        return
+    if filtered.empty:
+        st.info("No enrolments match the selected filters.")
+        return
+    data = filtered.copy()
+    for source, target in [("gender", "gender_group"), ("broad_foe", "field_group")]:
+        data[target] = data[source].astype("string").str.strip().fillna("Unknown").replace("", "Unknown")
+    # Combine Low with Low SES; retain all other reported classifications.
+    ses_order = ["Not low SES", "Low SES", "Medium", "Out of Scope", "High", "Unknown"]
+    labels = {value.casefold(): value for value in ses_order}
+    labels["low"] = "Low SES"
+    raw_ses = data["SES_2016_SA1"].astype("string").str.strip().fillna("Unknown").replace("", "Unknown")
+    data["ses_group"] = raw_ses.str.casefold().map(labels).fillna(raw_ses)
+    ses_order += sorted(set(data["ses_group"]) - set(ses_order))
+    reported = set(data["gender_group"])
+    gender_order = [g for g in ["Females", "Males", "Indeterminate/Intersex/Unspecified", "Unknown"] if g in reported]
+    gender_order += sorted(reported - set(gender_order))
+    field_height = max(450, 30 * data["field_group"].nunique() + 140)
+
+    # st.divider()
+    trend_col, field_col, ses_col = st.columns(3, gap="medium")
+    with trend_col:
+        st.markdown("**3. Gender composition and trends**")
+        gender = data.groupby(["ref_year", "gender_group"], as_index=False)["enrolments"].sum()
+        gender["Share (%)"] = gender["enrolments"].div(gender.groupby("ref_year")["enrolments"].transform("sum").replace(0, float("nan"))).mul(100)
+        fig = px.bar(gender, x="ref_year", y="Share (%)", color="gender_group", barmode="stack",
+                     custom_data=["enrolments"], category_orders={"gender_group": gender_order},
+                     color_discrete_map={"Females": "#83C9FF", "Males": "#0068C9", "Indeterminate/Intersex/Unspecified": "#FFABAB", "Unknown": "#8793A3"},
+                     labels={"ref_year": "Year", "gender_group": "Gender"})
+        fig.update_traces(hovertemplate="%{fullData.name}<br>Year: %{x}<br>Share: %{y:.1f}%<br>Enrolments: %{customdata[0]:,.0f}<extra></extra>")
+        fig.update_yaxes(range=[0, 100], ticksuffix="%")
+        fig.update_xaxes(tickmode="array", tickvals=sorted(data["ref_year"].unique()))
+        fig.update_layout(height=field_height, margin=dict(l=15, r=15, t=35, b=80),
+                          legend=dict(orientation="h", yanchor="top", y=-0.2), font=dict(size=11))
+        st.plotly_chart(fig, width="stretch")
+    with field_col:
+        st.markdown("**4. Gender participation by field of education**")
+        participation_heatmap(data, "field_group", "gender_group", "Field of education", "Gender",
+                              column_order=gender_order, height=field_height)
+    with ses_col:
+        st.markdown("**5. Gender participation by socioeconomic classification**")
+        exclude_unclassified = st.toggle(
+            "Hide Unknown and Out of Scope", value=False,
+            key="equity_hide_unclassified",
+            help="Applies only to this heatmap. Low and Low SES are combined."
+        )
+        chart_data = data
+        chart_ses_order = ses_order
+        if exclude_unclassified:
+            chart_data = data[~data["ses_group"].isin(["Unknown", "Out of Scope"])]
+            chart_ses_order = [label for label in ses_order if label not in ["Unknown", "Out of Scope"]]
+        if chart_data.empty:
+            st.info("No enrolments remain after excluding Unknown and Out of Scope.")
+        else:
+            participation_heatmap(chart_data, "ses_group", "gender_group", "SES classification", "Gender",
+                                  column_order=gender_order, row_order=chart_ses_order, height=field_height)
+        st.caption("Gender mix within each SES category (%), across all selected years and enrolments.")
+
+DATA_FILE = Path(r"C:\Users\jemur\Dropbox\UNSW_26\unsw_app\VIC_Uni_Enrols_2019-2021_Exercise 1.xlsx")
+source_stat = DATA_FILE.stat()
+df, validation_results = load_and_clean(
+    str(DATA_FILE), (source_stat.st_mtime_ns, source_stat.st_size)
+)
 
 # -----------------------------
 # SIDEBAR
@@ -168,7 +265,7 @@ section = st.sidebar.radio(
         "Market Overview",
         "Competition",
         "Portfolio",
-        "Student Demand"
+        "Student Demand & Equity"
     ]
 )
 
@@ -181,7 +278,7 @@ competitors_only = st.sidebar.checkbox(
     value=False
 )
 
-df_filtered = df.copy()
+df_filtered = df
 
 if competitors_only:
     df_filtered = df_filtered[
@@ -253,10 +350,10 @@ if section == "Data Validation":
     )
 
     st.dataframe(table, hide_index=True)
-    st.caption(
-        "Percentages use 236,657 source records. Enrolments are weighted counts. "
-        "Categories can overlap across columns; do not sum them."
-    )
+
+    st.subheader("Data loading and cleaning validation results")
+    st.caption("Results for the complete source dataset, before sidebar filters.")
+    st.code(validation_results, language="text")
 
 elif section == "Market Overview":
 
@@ -365,8 +462,6 @@ elif section == "Market Overview":
     # CHART 1: TOTAL ENROLMENTS
     # -----------------------------
 
-    # st.subheader("1. Total enrolment trends")
-
     fig_total = px.bar(
         yearly,
         x="ref_year",
@@ -392,13 +487,9 @@ elif section == "Market Overview":
         showlegend=False
     )
 
-    # st.plotly_chart(fig_total, use_container_width=True)
-
     # -----------------------------
     # CHART 2: STUDENT ORIGIN
     # -----------------------------
-
-    # st.subheader("2. Domestic vs international")
 
     fig_origin = px.line(
         origin,
@@ -420,9 +511,6 @@ elif section == "Market Overview":
         )
     )
 
-    # st.plotly_chart(fig_origin, use_container_width=True)
-
-    
     # -----------------------------
     # CHART 3: COMPOSITION (100%)
     # -----------------------------
@@ -478,17 +566,15 @@ elif section == "Market Overview":
 
     with col1:
         st.markdown("**1. Total enrolment trends**")
-        st.plotly_chart(fig_total, use_container_width=True)
+        st.plotly_chart(fig_total, width="stretch")
 
     with col2:
         st.markdown("**2. Domestic vs international**")
-        st.plotly_chart(fig_origin, use_container_width=True)
+        st.plotly_chart(fig_origin, width="stretch")
 
     with col3:
         st.markdown("**3. Student composition (%)**")
-        st.plotly_chart(fig_mix, use_container_width=True)
-
-    
+        st.plotly_chart(fig_mix, width="stretch")
 
     # ============================================
     # INTERNATIONAL MARKETS - CHARTS 4, 5 AND 6
@@ -529,12 +615,6 @@ elif section == "Market Overview":
             .str.strip()
         )
 
-        # # Get unique countries
-        # unique_countries = international['country'].unique()
-
-        # # Display in Streamlit
-        # st.write(unique_countries)
-
         international = international[
             international["country"].notna()
             & ~international["country"].str.casefold().isin([
@@ -546,9 +626,17 @@ elif section == "Market Overview":
             ])
         ].copy()
 
-        if international.empty:
+        # Chart 5 domestic benchmark follows student status, not home residence.
+        domestic_fields = filtered[
+            filtered["overseas_domestic_indicator"].astype("string")
+            .str.strip().str.casefold().eq("domestic students").fillna(False)
+        ].copy()
+        domestic_label = "Australia (Domestic Students)"
+        domestic_fields["country"] = domestic_label
+
+        if international.empty and domestic_fields.empty:
             st.warning(
-                "No international enrolments match the selected filters."
+                "No international or domestic enrolments match the selected filters."
             )
 
         else:
@@ -774,6 +862,11 @@ elif section == "Market Overview":
                 )
             ].copy()
 
+            # Always include the domestic benchmark, independently of the
+            # international top-80% toggle. Overseas/unknown status is not domestic.
+            field_data = pd.concat([field_data, domestic_fields], ignore_index=True)
+            heatmap_rows = selected_countries + ([domestic_label] if not domestic_fields.empty else [])
+
             field_year = (
                 field_data.groupby(
                     ["country", "broad_foe", "ref_year"]
@@ -809,7 +902,7 @@ elif section == "Market Overview":
             heatmap_matrix = (
                 field_year["growth_pct"]
                 .unstack("broad_foe")
-                .reindex(selected_countries)
+                .reindex(heatmap_rows)
             )
 
             # Sort countries by latest enrolment volume
@@ -819,6 +912,8 @@ elif section == "Market Overview":
                 ).index.tolist()
             )
 
+            if not domestic_fields.empty:
+                country_order = [domestic_label] + country_order
             heatmap_matrix = heatmap_matrix.reindex(
                 country_order
             )
@@ -851,73 +946,17 @@ elif section == "Market Overview":
             )
 
             # ========================================
-            # CHART 6 - CONTRIBUTION TO ENROLMENT GROWTH
-            # ========================================
-
-            contribution_data = (
-                country_data.reset_index()
-                .sort_values("growth_abs")
-            )
-
-            contribution_data["direction"] = (
-                contribution_data["growth_abs"].apply(
-                    lambda x: "Growth" if x > 0
-                    else "Decline" if x < 0
-                    else "No change"
-                )
-            )
-
-            fig_contribution = px.bar(
-                contribution_data,
-                x="growth_abs",
-                y="country",
-                orientation="h",
-                color="direction",
-                color_discrete_map={
-                    "Growth": "#28A879",
-                    "Decline": "#E36A63",
-                    "No change": "#AAB4BF"
-                },
-                labels={
-                    "growth_abs": "Change in enrolments",
-                    "country": "Country",
-                    "direction": "Trend"
-                },
-                hover_data={
-                    "growth_abs": ":+,",
-                    "growth_pct": ":.1f",
-                    "share_pct": ":.2f"
-                }
-            )
-
-            fig_contribution.add_vline(
-                x=0,
-                line_color="grey",
-                line_width=1
-            )
-
-            fig_contribution.update_layout(
-                yaxis=dict(
-                    categoryorder="array",
-                    categoryarray=contribution_data[
-                        "country"
-                    ].tolist()
-                )
-            )
-
-            # ========================================
             # CHART FORMATTING
             # ========================================
 
             chart_height = max(
                 420,
-                min(850, 180 + len(selected_countries) * 25)
+                min(850, 180 + len(heatmap_rows) * 25)
             )
 
             for fig in [
                 fig_positioning,
-                fig_heatmap,
-                fig_contribution
+                fig_heatmap
             ]:
                 fig.update_layout(
                     height=chart_height,
@@ -965,26 +1004,22 @@ elif section == "Market Overview":
                 )
                 st.plotly_chart(
                     fig_positioning,
-                    use_container_width=True
+                    width="stretch"
                 )
 
             with col5:
                 st.markdown(
                     "**5. Growth by Country and Field**"
                 )
+                st.caption(
+                    "Australia includes Domestic Students regardless of home residence. "
+                    "Overseas students with Australian or missing residence are excluded. "
+                    "The 80% toggle applies only to international country rows."
+                )
                 st.plotly_chart(
                     fig_heatmap,
-                    use_container_width=True
+                    width="stretch"
                 )
-
-            # with col6:
-            #     st.markdown(
-            #         "**6. Contribution to Enrolment Growth**"
-            #     )
-            #     st.plotly_chart(
-            #         fig_contribution,
-            #         use_container_width=True
-            #     )
 
             st.caption(
                 f"Market-positioning quadrants use a {share_threshold:.2f}% "
@@ -1008,8 +1043,6 @@ elif section == "Market Overview":
                 f"{min_baseline} baseline enrolments."
             )
 
-
-
     # -----------------------------
     # EXECUTIVE INSIGHT
     # -----------------------------
@@ -1018,7 +1051,6 @@ elif section == "Market Overview":
     st.info(
         f"Prioritise targeted recruitment campaigns and institutional partnerships in Vietnam, while implementing retention and re-engagement initiatives for Chinese students. In parallel, expand domestic recruitment in high-demand fields."
     )    
-
 
 elif section == "Competition":
 
@@ -1231,7 +1263,6 @@ elif section == "Competition":
 
         fig_share.update_yaxes(ticksuffix=" pp")
 
-
         # ==========================================
         # CHART 3 - TOTAL MARKET SHARE BY INSTITUTION
         # ==========================================
@@ -1283,7 +1314,6 @@ elif section == "Competition":
             showlegend=False
         )
 
-
         # ==========================================
         # CONSISTENT FORMATTING
         # ==========================================
@@ -1304,7 +1334,6 @@ elif section == "Competition":
                 xaxis=dict(title=None)
             )
 
-        
         # ==========================================
         # DISPLAY THREE CHARTS SIDE BY SIDE
         # ==========================================
@@ -1318,7 +1347,7 @@ elif section == "Competition":
             )
             st.plotly_chart(
                 fig_market_share,
-                use_container_width=True
+                width="stretch"
             )
 
         with col2:
@@ -1329,7 +1358,7 @@ elif section == "Competition":
             )
             st.plotly_chart(
                 fig_growth,
-                use_container_width=True
+                width="stretch"
             )
 
         with col3:
@@ -1340,10 +1369,9 @@ elif section == "Competition":
             )
             st.plotly_chart(
                 fig_share,
-                use_container_width=True
+                width="stretch"
             )     
 
-            
     # -----------------------------
     # EXECUTIVE INSIGHT
     # -----------------------------
@@ -1356,7 +1384,6 @@ elif section == "Competition":
         "target UNSW recruitment investment towards high-growth segments, strengthen "
         "differentiation against Monash and Melbourne"
     )      
-
 
 elif section == "Portfolio":
 
@@ -1473,12 +1500,9 @@ elif section == "Portfolio":
             yaxis_title="Enrolments"
         )
 
-        
         # ==========================================
         # CHART 2 - GROWTH OPPORTUNITY MATRIX
         # ==========================================
-
-        import plotly.graph_objects as go
 
         # Full five-university reference market.
         # Do not apply the sidebar university filter
@@ -1683,7 +1707,6 @@ elif section == "Portfolio":
             )
         )
 
-
         # ==========================================
         # CONSISTENT FORMATTING
         # ==========================================
@@ -1727,7 +1750,7 @@ elif section == "Portfolio":
 
             st.plotly_chart(
                 fig_course,
-                use_container_width=True
+                width="stretch"
             )
 
         with col2:
@@ -1738,7 +1761,7 @@ elif section == "Portfolio":
             )
             st.plotly_chart(
                 fig_opportunity,
-                use_container_width=True
+                width="stretch"
             ) 
 
     # -----------------------------
@@ -1755,10 +1778,9 @@ elif section == "Portfolio":
         "investment and rationalisation decisions"
     )         
 
+elif section == "Student Demand & Equity":
 
-elif section == "Student Demand":
-
-    st.title("Student Demand Characteristics")
+    st.title("Student Demand & Equity")
     st.caption(
         "Student progression and attendance composition | "
         f"{years[0]}–{years[1]}"
@@ -1974,7 +1996,7 @@ elif section == "Student Demand":
         )
         st.plotly_chart(
             fig_commencement,
-            use_container_width=True
+            width="stretch"
         )
 
     with col2:
@@ -1985,49 +2007,10 @@ elif section == "Student Demand":
         )
         st.plotly_chart(
             fig_attendance,
-            use_container_width=True
+            width="stretch"
         )
 
-    # ==========================================
-    # SUMMARY METRICS
-    # ==========================================
-
-    st.divider()
-    st.subheader("Student Demand Indicators")
-
-    latest_year = years[1]
-
-    latest_commencement = commencement_year[
-        commencement_year["ref_year"] == latest_year
-    ]
-
-    latest_attendance = attendance_year[
-        attendance_year["ref_year"] == latest_year
-    ]
-
-    commencing_share = latest_commencement.loc[
-        latest_commencement["student_status"] == "Commencing",
-        "share_pct"
-    ]
-
-    fulltime_share = latest_attendance.loc[
-        latest_attendance["attendance_type"] == "Full-time",
-        "share_pct"
-    ]
-
-    k1, k2 = st.columns(2)
-
-    k1.metric(
-        f"Commencing share ({latest_year})",
-        f"{commencing_share.iloc[0]:.1f}%"
-        if not commencing_share.empty else "N/A"
-    )
-
-    k2.metric(
-        f"Full-time share ({latest_year})",
-        f"{fulltime_share.iloc[0]:.1f}%"
-        if not fulltime_share.empty else "N/A"
-    )
+    render_equity(filtered, years[1])
 
     # -----------------------------
     # EXECUTIVE INSIGHT
@@ -2039,9 +2022,12 @@ elif section == "Student Demand":
         "and improved applicant conversion, while expanding flexible study " 
         "options to meet growing part-time demand. Monitor intake, retention " 
         "and attendance trends to guide programme planning"
+
+        "Target outreach and mentoring to women in Engineering and IT and men in Education and Health. "
+        "Pair recruitment with low SES financial support, and track enrolment conversion and retention by" 
+        "gender and SES after each intake."
     )    
 
 else:
     st.info("This section will be developed in the next stage.")
-
 
