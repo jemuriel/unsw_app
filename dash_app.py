@@ -245,7 +245,13 @@ def render_equity(filtered, latest_year):
                                   column_order=gender_order, row_order=chart_ses_order, height=field_height)
         st.caption("Gender mix within each SES category (%), across all selected years and enrolments.")
 
-DATA_FILE = Path(r"C:\Users\jemur\Dropbox\UNSW_26\unsw_app\VIC_Uni_Enrols_2019-2021_Exercise 1.xlsx")
+DATA_FILE = (
+    Path(__file__).resolve().parent
+    / "VIC_Uni_Enrols_2019-2021_Exercise 1.xlsx"
+)
+if not DATA_FILE.is_file():
+    st.error(f"Workbook not found: {DATA_FILE.name}. Place it in the same folder as dash_app.py.")
+    st.stop()
 source_stat = DATA_FILE.stat()
 df, validation_results = load_and_clean(
     str(DATA_FILE), (source_stat.st_mtime_ns, source_stat.st_size)
